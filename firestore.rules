@@ -1,0 +1,107 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper functions for Role-Based Access Control
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && getUserData().role == 'admin';
+    }
+    
+    function isDoctor() {
+      return isAuthenticated() && getUserData().role == 'doctor';
+    }
+    
+    function isPatient() {
+      return isAuthenticated() && getUserData().role == 'patient';
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // 1. Users collection
+    match /users/{userId} {
+      // Anyone authenticated can read user basics (needed for doctors and appointment cards)
+      allow read: if isAuthenticated();
+      
+      // Users can only create/update their own profile
+      // Cannot elevate their own role to admin or doctor
+      allow create: if isOwner(userId) && 
+        (request.resource.data.role == 'patient' || isAdmin());
+        
+      allow update: if isOwner(userId) && 
+        (request.resource.data.role == resource.data.role || isAdmin());
+        
+      allow delete: if isAdmin();
+    }
+
+    // 2. Doctors collection
+    match /doctors/{doctorId} {
+      // Public directory read access
+      allow read: if true;
+      
+      // Only admins or the verified doctor can modify their profile
+      allow create, update: if isAdmin() || (isDoctor() && resource.data.uid == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    // 3. Specialties collection
+    match /specialties/{specialtyId} {
+      // Publicly readable
+      allow read: if true;
+      
+      // Only admins can add or remove specialties
+      allow write: if isAdmin();
+    }
+
+    // 4. Appointments collection
+    match /appointments/{appointmentId} {
+      // Readable by involved patient, involved doctor, or admin
+      allow read: if isAuthenticated() && (
+        resource.data.patientId == request.auth.uid ||
+        resource.data.doctorUid == request.auth.uid ||
+        resource.data.doctorId == request.auth.uid ||
+        isAdmin()
+      );
+
+      // Patients can book appointments for themselves
+      allow create: if isAuthenticated() && 
+        request.resource.data.patientId == request.auth.uid &&
+        request.resource.data.status == 'Pending';
+
+      // Doctors can approve, reject, or complete; Patients can cancel or reschedule
+      allow update: if isAuthenticated() && (
+        isAdmin() ||
+        (isDoctor() && (resource.data.doctorUid == request.auth.uid || resource.data.doctorId == request.auth.uid)) ||
+        (resource.data.patientId == request.auth.uid && 
+          (request.resource.data.status == 'Cancelled' || request.resource.data.status == 'Pending'))
+      );
+
+      allow delete: if isAdmin();
+    }
+
+    // 5. Notifications collection
+    match /notifications/{notificationId} {
+      // Users can read and mark their own notifications as read
+      allow read, update: if isAuthenticated() && 
+        (resource.data.userId == request.auth.uid || resource.data.userId == 'all');
+      allow create: if isAuthenticated();
+      allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+    }
+
+    // 6. Reviews collection
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuthenticated();
+      allow update, delete: if isAdmin();
+    }
+  }
+}
